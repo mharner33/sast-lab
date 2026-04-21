@@ -1,0 +1,73 @@
+# Security scans: Bandit, Semgrep, Pylint, Safety (Safety CLI 3: `safety scan`; legacy `safety check` is deprecated)
+name: security-scan
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install project and tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+
+      - name: Run security scans
+        env:
+          # Optional: add repo secret SAFETY_API_KEY if Safety requires auth for your scan stage
+          SAFETY_API_KEY: ${{ secrets.SAFETY_API_KEY }}
+        run: |
+          set +e
+          mkdir -p security-reports
+          ec=0
+
+          bandit -r . \
+            -x ./.venv,./.git,./security-reports \
+            -f json \
+            -o security-reports/bandit-results.json \
+            || ec=1
+
+          # --config auto requires metrics; use a fixed ruleset if you need --metrics off
+          semgrep scan --config auto \
+            --json-output=security-reports/semgrep-results.json \
+            . \
+            || ec=1
+
+          mapfile -t pyfiles < <(find . -name '*.py' \
+            -not -path './.venv/*' \
+            -not -path './.git/*')
+          if [ ${#pyfiles[@]} -eq 0 ]; then
+            echo '[]' > security-reports/pylint-results.json
+          else
+            pylint "${pyfiles[@]}" --output-format=json \
+              > security-reports/pylint-results.json \
+              || ec=1
+          fi
+
+          safety scan --save-as json security-reports/safety-results.json \
+            || ec=1
+
+          exit "$ec"
+
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: security-reports/
+          if-no-files-found: warn
